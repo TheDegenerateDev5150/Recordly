@@ -421,6 +421,10 @@ describe("getExperimentalNvidiaCudaExportSkipReason", () => {
 		process.env[exportEnvName] = "1";
 		process.env[forceEnvName] = "1";
 		delete process.env[allowAudioEnvName];
+		fsMocks.access.mockResolvedValue(undefined);
+		electronAppMock.getGPUInfo.mockResolvedValue({
+			gpuDevice: [{ vendorId: 0x10de, deviceString: "NVIDIA GeForce GTX 1650" }],
+		});
 
 		try {
 			const reason = await getExperimentalNvidiaCudaExportSkipReason(
@@ -445,6 +449,31 @@ describe("getExperimentalNvidiaCudaExportSkipReason", () => {
 				delete process.env[allowAudioEnvName];
 			} else {
 				process.env[allowAudioEnvName] = originalAllowAudioEnv;
+			}
+			electronAppMock.getGPUInfo.mockReset();
+			electronAppMock.getGPUInfo.mockResolvedValue({ gpuDevice: [] });
+			resetFsAccessMock();
+		}
+	});
+
+	it("reports explicit lab CUDA as unavailable when the wrapper cannot be resolved", async () => {
+		const exportEnvName = "RECORDLY_EXPERIMENTAL_NVIDIA_CUDA_EXPORT";
+		const originalExportEnv = process.env[exportEnvName];
+		process.env[exportEnvName] = "1";
+
+		try {
+			const reason = await getExperimentalNvidiaCudaExportSkipReason(
+				createNvidiaCudaSkipOptions(),
+			);
+
+			expect(reason).toBe(
+				process.platform === "win32" ? "cuda-wrapper-unavailable" : "not-windows",
+			);
+		} finally {
+			if (originalExportEnv === undefined) {
+				delete process.env[exportEnvName];
+			} else {
+				process.env[exportEnvName] = originalExportEnv;
 			}
 		}
 	});
@@ -675,6 +704,50 @@ describe("buildExperimentalNvidiaCudaStaticLayoutArgs", () => {
 });
 
 describe("buildExperimentalWindowsGpuStaticLayoutArgs", () => {
+	it("prefers the high-performance adapter by default for D3D11 fallback diagnostics", () => {
+		const envName = "RECORDLY_WINDOWS_GPU_EXPORT_ADAPTER_INDEX";
+		const originalValue = process.env[envName];
+		delete process.env[envName];
+
+		try {
+			const args = buildExperimentalWindowsGpuStaticLayoutArgs(
+				createNvidiaCudaSkipOptions(),
+				"output.mp4",
+			);
+
+			expect(args).toContain("--prefer-high-performance-adapter");
+			expect(args).not.toContain("--adapter-index");
+		} finally {
+			if (originalValue === undefined) {
+				delete process.env[envName];
+			} else {
+				process.env[envName] = originalValue;
+			}
+		}
+	});
+
+	it("passes an explicit D3D11 adapter index when configured", () => {
+		const envName = "RECORDLY_WINDOWS_GPU_EXPORT_ADAPTER_INDEX";
+		const originalValue = process.env[envName];
+
+		try {
+			process.env[envName] = "2";
+			const args = buildExperimentalWindowsGpuStaticLayoutArgs(
+				createNvidiaCudaSkipOptions(),
+				"output.mp4",
+			);
+
+			expect(args).toEqual(expect.arrayContaining(["--adapter-index", "2"]));
+			expect(args).not.toContain("--prefer-high-performance-adapter");
+		} finally {
+			if (originalValue === undefined) {
+				delete process.env[envName];
+			} else {
+				process.env[envName] = originalValue;
+			}
+		}
+	});
+
 	it("passes background blur to the D3D11 compositor", () => {
 		const args = buildExperimentalWindowsGpuStaticLayoutArgs(
 			createNvidiaCudaSkipOptions({

@@ -50,6 +50,10 @@ const NVIDIA_CUDA_AUTO_STALL_TIMEOUT_ENV = "RECORDLY_NVIDIA_CUDA_AUTO_STALL_TIME
 const DEFAULT_NVIDIA_CUDA_AUTO_STALL_TIMEOUT_MS = 120_000;
 const NATIVE_GPU_STALL_TIMEOUT_ENV = "RECORDLY_NATIVE_GPU_STALL_TIMEOUT_MS";
 const DEFAULT_NATIVE_GPU_STALL_TIMEOUT_MS = 120_000;
+const WINDOWS_GPU_ADAPTER_INDEX_ENV = "RECORDLY_WINDOWS_GPU_EXPORT_ADAPTER_INDEX";
+const WINDOWS_GPU_PREFER_HIGH_PERFORMANCE_ADAPTER_ENV =
+	"RECORDLY_WINDOWS_GPU_EXPORT_PREFER_HIGH_PERFORMANCE_ADAPTER";
+const WINDOWS_GPU_NVENC_SDK_ENV = "RECORDLY_WINDOWS_GPU_EXPORT_NVENC_SDK";
 const NATIVE_STATIC_LAYOUT_SOURCE_PROXY_REFERENCE_PIXEL_RATE = 1920 * 1080 * 30;
 const NATIVE_STATIC_LAYOUT_SOURCE_PROXY_1080P30_BITRATE = 24_000_000;
 const NATIVE_STATIC_LAYOUT_SOURCE_PROXY_MAX_BITRATE = 80_000_000;
@@ -63,6 +67,63 @@ type ElectronGpuDeviceLike = {
 
 type ElectronGpuInfoLike = {
 	gpuDevice?: ElectronGpuDeviceLike[];
+};
+
+type NativeStaticLayoutSourceInput = {
+	inputPath: string;
+	elapsedMs: number;
+	sourceCodec: string;
+	proxyCodec?: string;
+	proxyCreated: boolean;
+};
+
+type NativeStaticLayoutRouteId =
+	| "nvidia-cuda-compositor"
+	| "windows-d3d11-compositor"
+	| "ffmpeg-static-layout";
+
+type NativeStaticLayoutRouteDecision = {
+	route: NativeStaticLayoutRouteId;
+	status: "selected" | "fallback" | "rejected";
+	reasons: string[];
+};
+
+type NvidiaCudaExportCapabilityProbe = {
+	platform: NodeJS.Platform;
+	appPackaged: boolean;
+	explicitEnabled: boolean;
+	explicitDisabled: boolean;
+	packagedAutoCandidateEnabled: boolean;
+	packagedAutoCandidateActive: boolean;
+	windowsGpuCompositorEnabled: boolean;
+	wrapperPath: string | null;
+	hasNvidiaGpu: boolean | null;
+	audioMode: NativeVideoExportAudioMode;
+	audioSkipReason: string | null;
+	stallTimeoutMs: number | null;
+	skipReason: string | null;
+};
+
+type WindowsD3D11ExportCapabilityProbe = {
+	platform: NodeJS.Platform;
+	windowsGpuCompositorEnabled: boolean;
+	helperPath: string | null;
+	adapterIndexOverride: number | null;
+	preferHighPerformanceAdapter: boolean;
+	nvencSdkRequested: boolean;
+	skipReason: string | null;
+};
+
+type NativeStaticLayoutRoutePlan = {
+	selectedRoute: NativeStaticLayoutRouteId;
+	decisions: NativeStaticLayoutRouteDecision[];
+	cuda: NvidiaCudaExportCapabilityProbe;
+	d3d11: WindowsD3D11ExportCapabilityProbe;
+	source: {
+		inputCodec: string;
+		proxyCodec?: string;
+		proxyCreated: boolean;
+	};
 };
 
 export type NativeVideoExportSession = {
@@ -1866,6 +1927,24 @@ async function hasNvidiaGpuForCudaExportCandidate() {
 	}
 }
 
+function getWindowsGpuAdapterIndexOverride() {
+	const rawValue = process.env[WINDOWS_GPU_ADAPTER_INDEX_ENV]?.trim();
+	if (!rawValue) {
+		return null;
+	}
+
+	const parsed = Number(rawValue);
+	return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function shouldPreferHighPerformanceWindowsGpuAdapter() {
+	return process.env[WINDOWS_GPU_PREFER_HIGH_PERFORMANCE_ADAPTER_ENV] !== "0";
+}
+
+function isWindowsGpuNvencSdkRequested() {
+	return process.env[WINDOWS_GPU_NVENC_SDK_ENV] === "1";
+}
+
 function getNativeBinPlatformArch() {
 	return process.arch === "arm64" ? "win32-arm64" : "win32-x64";
 }
@@ -1998,31 +2077,178 @@ export function getNativeGpuCompositorStallTimeoutMs() {
 export async function getExperimentalNvidiaCudaExportSkipReason(
 	options: NativeStaticLayoutExportOptions,
 ) {
-	if (process.platform !== "win32") {
-		return "not-windows";
-	}
+	return (await probeExperimentalNvidiaCudaExportCapability(options)).skipReason;
+}
+
+export async function probeExperimentalNvidiaCudaExportCapability(
+	options: NativeStaticLayoutExportOptions,
+): Promise<NvidiaCudaExportCapabilityProbe> {
 	const explicitCuda = isExplicitNvidiaCudaExportEnabled();
-	const packagedAutoCandidate = isPackagedNvidiaCudaExportAutoCandidateEnabled();
-	if (!explicitCuda && !packagedAutoCandidate) {
-		return "env-disabled";
-	}
-	if (!options.experimentalWindowsGpuCompositor) {
-		return "windows-gpu-compositor-disabled";
-	}
-
-	if (packagedAutoCandidate && !explicitCuda) {
-		if (!(await resolveExperimentalNvidiaCudaExportScriptPath())) {
-			return "cuda-wrapper-unavailable";
-		}
-		if (!(await hasNvidiaGpuForCudaExportCandidate())) {
-			return "nvidia-gpu-unavailable";
-		}
-	}
-
-	return getNvidiaCudaAudioExportSkipReason(options.audioOptions?.audioMode, {
+	const packagedAutoCandidateEnabled = isPackagedNvidiaCudaExportAutoCandidateEnabled();
+	const packagedAutoCandidateActive = isPackagedNvidiaCudaExportAutoCandidateActive();
+	const shouldProbeHelper = explicitCuda || packagedAutoCandidateEnabled;
+	const wrapperPath =
+		process.platform === "win32" && shouldProbeHelper
+			? await resolveExperimentalNvidiaCudaExportScriptPath()
+			: null;
+	const hasNvidiaGpu =
+		process.platform === "win32" && shouldProbeHelper && wrapperPath
+			? await hasNvidiaGpuForCudaExportCandidate()
+			: null;
+	const audioMode = options.audioOptions?.audioMode ?? "none";
+	const audioSkipReason = getNvidiaCudaAudioExportSkipReason(audioMode, {
 		allowValidatedFallbackCandidate:
-			packagedAutoCandidate || isNvidiaCudaForceVideoOnlyEnabled(),
+			packagedAutoCandidateEnabled || isNvidiaCudaForceVideoOnlyEnabled(),
 	});
+	let skipReason: string | null = null;
+
+	if (process.platform !== "win32") {
+		skipReason = "not-windows";
+	} else if (!explicitCuda && !packagedAutoCandidateEnabled) {
+		skipReason = "env-disabled";
+	} else if (!options.experimentalWindowsGpuCompositor) {
+		skipReason = "windows-gpu-compositor-disabled";
+	} else if (!wrapperPath) {
+		skipReason = "cuda-wrapper-unavailable";
+	} else if (hasNvidiaGpu === false) {
+		skipReason = "nvidia-gpu-unavailable";
+	} else {
+		skipReason = audioSkipReason;
+	}
+
+	return {
+		platform: process.platform,
+		appPackaged: app.isPackaged,
+		explicitEnabled: explicitCuda,
+		explicitDisabled: isExplicitNvidiaCudaExportDisabled(),
+		packagedAutoCandidateEnabled,
+		packagedAutoCandidateActive,
+		windowsGpuCompositorEnabled: options.experimentalWindowsGpuCompositor === true,
+		wrapperPath,
+		hasNvidiaGpu,
+		audioMode,
+		audioSkipReason,
+		stallTimeoutMs: getNvidiaCudaAutoStallTimeoutMs(packagedAutoCandidateActive),
+		skipReason,
+	};
+}
+
+async function probeExperimentalWindowsD3D11ExportCapability(
+	options: NativeStaticLayoutExportOptions,
+): Promise<WindowsD3D11ExportCapabilityProbe> {
+	const helperPath =
+		process.platform === "win32" && options.experimentalWindowsGpuCompositor === true
+			? await resolveExperimentalWindowsGpuExporterPath()
+			: null;
+	let skipReason: string | null = null;
+	if (process.platform !== "win32") {
+		skipReason = "not-windows";
+	} else if (options.experimentalWindowsGpuCompositor !== true) {
+		skipReason = "windows-gpu-compositor-disabled";
+	} else if (!helperPath) {
+		skipReason = "windows-gpu-helper-unavailable";
+	}
+
+	return {
+		platform: process.platform,
+		windowsGpuCompositorEnabled: options.experimentalWindowsGpuCompositor === true,
+		helperPath,
+		adapterIndexOverride: getWindowsGpuAdapterIndexOverride(),
+		preferHighPerformanceAdapter: shouldPreferHighPerformanceWindowsGpuAdapter(),
+		nvencSdkRequested: isWindowsGpuNvencSdkRequested(),
+		skipReason,
+	};
+}
+
+async function planNativeStaticLayoutRoutes(
+	options: NativeStaticLayoutExportOptions,
+	source: NativeStaticLayoutSourceInput,
+): Promise<NativeStaticLayoutRoutePlan> {
+	const cuda = await probeExperimentalNvidiaCudaExportCapability(options);
+	const d3d11 = await probeExperimentalWindowsD3D11ExportCapability(options);
+	const decisions: NativeStaticLayoutRouteDecision[] = [];
+
+	if (!cuda.skipReason) {
+		decisions.push({
+			route: "nvidia-cuda-compositor",
+			status: "selected",
+			reasons: ["cuda-wrapper-and-nvidia-gpu-available"],
+		});
+		decisions.push({
+			route: "windows-d3d11-compositor",
+			status: d3d11.skipReason ? "rejected" : "fallback",
+			reasons: d3d11.skipReason
+				? [d3d11.skipReason]
+				: ["documented-fallback-if-cuda-runtime-fails"],
+		});
+		decisions.push({
+			route: "ffmpeg-static-layout",
+			status: "fallback",
+			reasons: ["native-gpu-runtime-fallback"],
+		});
+		return {
+			selectedRoute: "nvidia-cuda-compositor",
+			decisions,
+			cuda,
+			d3d11,
+			source: {
+				inputCodec: source.sourceCodec,
+				proxyCodec: source.proxyCodec,
+				proxyCreated: source.proxyCreated,
+			},
+		};
+	}
+
+	decisions.push({
+		route: "nvidia-cuda-compositor",
+		status: "rejected",
+		reasons: [cuda.skipReason],
+	});
+	if (!d3d11.skipReason) {
+		decisions.push({
+			route: "windows-d3d11-compositor",
+			status: "selected",
+			reasons: [`documented-fallback-after-cuda-skip:${cuda.skipReason}`],
+		});
+		decisions.push({
+			route: "ffmpeg-static-layout",
+			status: "fallback",
+			reasons: ["windows-d3d11-runtime-fallback"],
+		});
+		return {
+			selectedRoute: "windows-d3d11-compositor",
+			decisions,
+			cuda,
+			d3d11,
+			source: {
+				inputCodec: source.sourceCodec,
+				proxyCodec: source.proxyCodec,
+				proxyCreated: source.proxyCreated,
+			},
+		};
+	}
+
+	decisions.push({
+		route: "windows-d3d11-compositor",
+		status: "rejected",
+		reasons: [d3d11.skipReason],
+	});
+	decisions.push({
+		route: "ffmpeg-static-layout",
+		status: "selected",
+		reasons: ["native-gpu-routes-unavailable"],
+	});
+	return {
+		selectedRoute: "ffmpeg-static-layout",
+		decisions,
+		cuda,
+		d3d11,
+		source: {
+			inputCodec: source.sourceCodec,
+			proxyCodec: source.proxyCodec,
+			proxyCreated: source.proxyCreated,
+		},
+	};
 }
 
 export async function resolveExperimentalNvidiaCudaExportScriptPath() {
@@ -2159,6 +2385,15 @@ export function buildExperimentalWindowsGpuStaticLayoutArgs(
 		"--surface-pool-size",
 		String(surfacePoolSize),
 	];
+	const adapterIndexOverride = getWindowsGpuAdapterIndexOverride();
+	if (adapterIndexOverride !== null) {
+		args.push("--adapter-index", String(adapterIndexOverride));
+	} else if (shouldPreferHighPerformanceWindowsGpuAdapter()) {
+		args.push("--prefer-high-performance-adapter");
+	}
+	if (isWindowsGpuNvencSdkRequested()) {
+		args.push("--nvenc-sdk");
+	}
 
 	if (options.backgroundImagePath) {
 		args.push("--background-image", options.backgroundImagePath);
@@ -3201,6 +3436,44 @@ export async function exportNativeStaticLayoutVideo(
 				timelineMapPath,
 			};
 		}
+		const nativeRoutePlan = await planNativeStaticLayoutRoutes(options, sourceInput);
+		console.info("[native-static-layout-export] Native route plan", {
+			selectedRoute: nativeRoutePlan.selectedRoute,
+			decisions: nativeRoutePlan.decisions,
+			cuda: {
+				platform: nativeRoutePlan.cuda.platform,
+				appPackaged: nativeRoutePlan.cuda.appPackaged,
+				explicitEnabled: nativeRoutePlan.cuda.explicitEnabled,
+				explicitDisabled: nativeRoutePlan.cuda.explicitDisabled,
+				packagedAutoCandidateEnabled: nativeRoutePlan.cuda.packagedAutoCandidateEnabled,
+				packagedAutoCandidateActive: nativeRoutePlan.cuda.packagedAutoCandidateActive,
+				windowsGpuCompositorEnabled: nativeRoutePlan.cuda.windowsGpuCompositorEnabled,
+				wrapperPath: nativeRoutePlan.cuda.wrapperPath,
+				hasNvidiaGpu: nativeRoutePlan.cuda.hasNvidiaGpu,
+				audioMode: nativeRoutePlan.cuda.audioMode,
+				audioSkipReason: nativeRoutePlan.cuda.audioSkipReason,
+				stallTimeoutMs: nativeRoutePlan.cuda.stallTimeoutMs,
+				skipReason: nativeRoutePlan.cuda.skipReason,
+			},
+			d3d11: nativeRoutePlan.d3d11,
+			source: nativeRoutePlan.source,
+			output: {
+				width: options.width,
+				height: options.height,
+				frameRate: options.frameRate,
+				durationSec: options.durationSec,
+			},
+			features: {
+				timelineMap: Boolean(options.timelineMapPath),
+				webcamOverlay: Boolean(options.webcamInputPath),
+				cursorOverlay: Boolean(options.cursorTelemetry?.length),
+				zoomOverlay: Boolean(options.zoomTelemetry?.length),
+				sourceCrop: hasNativeStaticLayoutSourceCrop(options),
+				backgroundImage: Boolean(options.backgroundImagePath),
+				backgroundBlurPx: options.backgroundBlurPx ?? 0,
+				audioMode: options.audioOptions?.audioMode ?? "none",
+			},
+		});
 		const fullConfig: NativeStaticLayoutExportArgsConfig = {
 			inputPath: options.inputPath,
 			outputPath: videoOnlyPath,
@@ -3293,9 +3566,17 @@ export async function exportNativeStaticLayoutVideo(
 					}
 				}
 				let experimentalNvidiaCudaOptions = experimentalGpuOptions;
-				const nvidiaCudaSkipReason =
-					await getExperimentalNvidiaCudaExportSkipReason(options);
-				let shouldTryNvidiaCuda = nvidiaCudaSkipReason === null;
+				let shouldTryNvidiaCuda =
+					nativeRoutePlan.selectedRoute === "nvidia-cuda-compositor";
+				let windowsD3D11FallbackReason =
+					nativeRoutePlan.decisions.find(
+						(decision) =>
+							decision.route === "windows-d3d11-compositor" &&
+							decision.status === "selected",
+					)?.reasons[0] ??
+					(nativeRoutePlan.cuda.skipReason
+						? `nvidia-cuda-skipped:${nativeRoutePlan.cuda.skipReason}`
+						: undefined);
 				if (
 					shouldTryNvidiaCuda &&
 					(isPackagedNvidiaCudaExportAutoCandidateActive() ||
@@ -3316,24 +3597,20 @@ export async function exportNativeStaticLayoutVideo(
 						},
 					);
 				}
-				const shouldLogNvidiaCudaSkip =
-					isExplicitNvidiaCudaExportEnabled() ||
-					(isPackagedNvidiaCudaExportAutoCandidateEnabled() &&
-						nvidiaCudaSkipReason !== "env-disabled");
 				if (
 					!shouldTryNvidiaCuda &&
-					shouldLogNvidiaCudaSkip &&
-					nvidiaCudaSkipReason !== "env-disabled"
+					(nativeRoutePlan.cuda.explicitEnabled ||
+						nativeRoutePlan.cuda.packagedAutoCandidateEnabled) &&
+					nativeRoutePlan.cuda.skipReason !== "env-disabled"
 				) {
-					console.warn(
-						"[native-static-layout-export] Skipping NVIDIA CUDA compositor; falling back to Windows GPU compositor",
-						{
-							reason: nvidiaCudaSkipReason,
-							audioMode: options.audioOptions?.audioMode ?? "none",
-							overrideEnv: NVIDIA_CUDA_ALLOW_AUDIO_EXPORT_ENV,
-							packagedAutoCandidate: isPackagedNvidiaCudaExportAutoCandidateEnabled(),
-						},
-					);
+					console.warn("[native-static-layout-export] Skipping NVIDIA CUDA compositor", {
+						reason: nativeRoutePlan.cuda.skipReason,
+						audioMode: nativeRoutePlan.cuda.audioMode,
+						overrideEnv: NVIDIA_CUDA_ALLOW_AUDIO_EXPORT_ENV,
+						wrapperPath: nativeRoutePlan.cuda.wrapperPath,
+						hasNvidiaGpu: nativeRoutePlan.cuda.hasNvidiaGpu,
+						selectedFallback: nativeRoutePlan.selectedRoute,
+					});
 				}
 				if (shouldTryNvidiaCuda && options.cursorTelemetry?.length) {
 					const cursorTelemetryPath = await prepareNvidiaCudaCursorTelemetry(
@@ -3354,6 +3631,12 @@ export async function exportNativeStaticLayoutVideo(
 							cursorAtlasMetadataPath: cursorAtlas.metadataPath,
 						};
 					}
+				}
+				if (
+					!shouldTryNvidiaCuda &&
+					nativeRoutePlan.selectedRoute === "nvidia-cuda-compositor"
+				) {
+					windowsD3D11FallbackReason = "nvidia-cuda-cursor-assets-unavailable";
 				}
 
 				if (shouldTryNvidiaCuda) {
@@ -3439,6 +3722,10 @@ export async function exportNativeStaticLayoutVideo(
 							throw error;
 						}
 						metrics.fallbackChunkCount++;
+						windowsD3D11FallbackReason =
+							error instanceof Error
+								? `nvidia-cuda-runtime-failed:${error.message}`
+								: "nvidia-cuda-runtime-failed";
 						console.warn(
 							"[native-static-layout-export] Experimental NVIDIA CUDA compositor failed or produced invalid output; falling back to Windows GPU compositor:",
 							error,
@@ -3447,7 +3734,18 @@ export async function exportNativeStaticLayoutVideo(
 					}
 				}
 
-				if (!didRenderVideo) {
+				if (!didRenderVideo && !nativeRoutePlan.d3d11.skipReason) {
+					console.info(
+						"[native-static-layout-export] Starting Windows D3D11 compositor fallback",
+						{
+							fallbackReason: windowsD3D11FallbackReason,
+							helperPath: nativeRoutePlan.d3d11.helperPath,
+							adapterIndexOverride: nativeRoutePlan.d3d11.adapterIndexOverride,
+							preferHighPerformanceAdapter:
+								nativeRoutePlan.d3d11.preferHighPerformanceAdapter,
+							nvencSdkRequested: nativeRoutePlan.d3d11.nvencSdkRequested,
+						},
+					);
 					const gpuResult = await runExperimentalWindowsGpuStaticLayoutExport(
 						experimentalGpuOptions,
 						videoOnlyPath,
@@ -3464,6 +3762,12 @@ export async function exportNativeStaticLayoutVideo(
 						);
 					}
 					await validateRenderedVideoOutput();
+					const verifiedNvidiaAdapter = isNvidiaVendorId(
+						gpuResult.summary.adapterVendorId,
+					);
+					const verifiedNvencBackend = /nvenc/i.test(
+						gpuResult.summary.encoderBackend ?? "",
+					);
 					console.info("[native-static-layout-export] Windows GPU compositor completed", {
 						elapsedMs: gpuResult.elapsedMs,
 						width: gpuResult.summary.width,
@@ -3474,7 +3778,15 @@ export async function exportNativeStaticLayoutVideo(
 						surfacePoolSize: gpuResult.summary.surfacePoolSize,
 						gpuDecodeSurface: gpuResult.summary.gpuDecodeSurface,
 						adapterIndex: gpuResult.summary.adapterIndex,
+						adapterVendorId: gpuResult.summary.adapterVendorId,
+						adapterDeviceId: gpuResult.summary.adapterDeviceId,
+						adapterDedicatedVideoMemoryMB:
+							gpuResult.summary.adapterDedicatedVideoMemoryMB,
 						encoderBackend: gpuResult.summary.encoderBackend,
+						verifiedNvidiaAdapter,
+						verifiedNvencBackend,
+						documentedFallback: !verifiedNvidiaAdapter || !verifiedNvencBackend,
+						fallbackReason: windowsD3D11FallbackReason,
 						encoderTuningApplied: gpuResult.summary.encoderTuningApplied,
 						readMs: gpuResult.summary.readMs,
 						videoProcessMs: gpuResult.summary.videoProcessMs,
@@ -3496,9 +3808,15 @@ export async function exportNativeStaticLayoutVideo(
 						backend: "windows-d3d11-compositor",
 						elapsedMs: gpuResult.elapsedMs,
 						outputBytes: outputStat.size,
+						fallbackReason: windowsD3D11FallbackReason,
 						windowsGpuSummary: gpuResult.summary,
 					});
 					didRenderVideo = true;
+				} else if (!didRenderVideo && nativeRoutePlan.d3d11.skipReason) {
+					console.warn("[native-static-layout-export] Skipping Windows D3D11 fallback", {
+						reason: nativeRoutePlan.d3d11.skipReason,
+						fallbackReason: windowsD3D11FallbackReason,
+					});
 				}
 			} catch (error) {
 				if (session.terminating) {

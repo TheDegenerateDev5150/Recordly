@@ -8,8 +8,8 @@ import type {
 	CursorStyle,
 	CursorTelemetryPoint,
 	Padding,
-	SpeedRegion,
 	SourceAudioTrackSettings,
+	SpeedRegion,
 	TrimRegion,
 	WebcamOverlaySettings,
 	ZoomMotionBlurTuning,
@@ -49,7 +49,12 @@ import {
 	isVideoWallpaperSource,
 } from "@/lib/wallpapers";
 import { AudioProcessor, isAacAudioEncodingSupported } from "./audioEncoder";
-import { normalizeLightningRuntimePlatform, shouldPreferNativeAutoBackend } from "./backendPolicy";
+import {
+	normalizeLightningRuntimePlatform,
+	planLightningExportRoutes,
+	shouldPreferNativeAutoBackend,
+	shouldPreferNativeStaticLayoutBeforeBreeze,
+} from "./backendPolicy";
 import { buildEditedTrackSourceSegments, classifyEditedTrackStrategy } from "./editedTrackStrategy";
 import {
 	type ExportBackpressureProfile,
@@ -358,13 +363,18 @@ export class ModernVideoExporter {
 			this.totalExportStartTimeMs = this.getNowMs();
 			const backendPreference = this.config.backendPreference ?? "auto";
 			const runtimePlatform = this.getRuntimePlatform();
+			const preferNativeStaticLayoutBeforeBreeze = shouldPreferNativeStaticLayoutBeforeBreeze(
+				runtimePlatform,
+				backendPreference,
+			);
 			let useNativeEncoder = false;
 			let triedNativeStaticLayoutWithProbe = false;
-			let shouldDeferNativeEncoderStart = backendPreference === "breeze";
+			let shouldDeferNativeEncoderStart =
+				backendPreference === "breeze" || preferNativeStaticLayoutBeforeBreeze;
 			this.lastNativeExportError = null;
 
 			let stageStartedAt = this.getNowMs();
-			if (backendPreference === "breeze") {
+			if (backendPreference === "breeze" || preferNativeStaticLayoutBeforeBreeze) {
 				// Defer the streaming native encoder until after metadata is known.
 				// Static-layout exports can then use the faster Windows D3D compositor
 				// instead of unnecessarily rendering every frame through JS first.
@@ -2145,6 +2155,26 @@ export class ModernVideoExporter {
 		const skipReasons = skipReason
 			? this.getNativeStaticLayoutSkipReasons(audioPlan, videoInfo, effectiveDuration)
 			: [];
+		const routePlan = planLightningExportRoutes({
+			backendPreference: this.config.backendPreference ?? "auto",
+			platform: this.getRuntimePlatform(),
+			nativeStaticLayoutAvailable: true,
+			nativeStaticLayoutSkipReasons: skipReasons,
+		});
+		console.info("[VideoExporter] Lightning route plan", {
+			selectedRoute: routePlan.selectedRoute,
+			decisions: routePlan.decisions,
+			audioMode: audioPlan.audioMode,
+			sourceCodec: videoInfo.codec,
+			sourceHasAudio: videoInfo.hasAudio,
+			width: this.config.width,
+			height: this.config.height,
+			frameRate: this.config.frameRate,
+			zoomRegions: this.config.zoomRegions?.length ?? 0,
+			speedRegions: this.config.speedRegions?.length ?? 0,
+			audioRegions: this.config.audioRegions?.length ?? 0,
+			experimentalNativeExport: this.config.experimentalNativeExport === true,
+		});
 		if (skipReason) {
 			this.nativeStaticLayoutSkipReason = skipReason;
 			this.nativeStaticLayoutSkipReasons = skipReasons;
