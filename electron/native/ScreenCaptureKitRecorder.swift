@@ -528,8 +528,35 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		]
 	}
 
+	private static func isLikelyDisplayAudioDevice(_ device: AVCaptureDevice) -> Bool {
+		let normalizedName = device.localizedName
+			.trimmingCharacters(in: .whitespacesAndNewlines)
+			.lowercased()
+		if normalizedName.isEmpty {
+			return false
+		}
+
+		let microphoneTokens = ["mic", "microphone", "headset", "airpods", "airpods max"]
+		let mentionsMicrophone = microphoneTokens.contains { normalizedName.contains($0) }
+		if normalizedName.contains("sidecar") {
+			return !mentionsMicrophone
+		}
+
+		if normalizedName.contains("continuity") && !mentionsMicrophone {
+			return true
+		}
+
+		let displayRouteTokens = ["display", "monitor", "screen", "hdmi", "airplay"]
+		let audioOutputTokens = ["audio", "speaker", "output"]
+		let mentionsDisplayRoute = displayRouteTokens.contains { normalizedName.contains($0) }
+		let mentionsAudioOutput = audioOutputTokens.contains { normalizedName.contains($0) }
+		return mentionsDisplayRoute && mentionsAudioOutput && !mentionsMicrophone
+	}
+
 	private static func resolveMicrophoneCaptureDeviceID(config: CaptureConfig) -> String? {
-		let audioDevices = AVCaptureDevice.devices(for: .audio)
+		let audioDevices = AVCaptureDevice.devices(for: .audio).filter {
+			!isLikelyDisplayAudioDevice($0)
+		}
 
 		if let microphoneLabel = config.microphoneLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !microphoneLabel.isEmpty {
 			if let matchedDevice = audioDevices.first(where: { $0.localizedName == microphoneLabel }) {

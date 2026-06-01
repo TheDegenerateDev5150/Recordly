@@ -8,6 +8,7 @@ import {
 	selectRecordingMimeType,
 	selectWebcamRecordingMimeType,
 } from "./recordingMimeType";
+import { getAvailableMicrophoneDevices } from "./useMicrophoneDevices";
 
 const TARGET_FRAME_RATE = 60;
 const TARGET_WIDTH = 3840;
@@ -380,13 +381,11 @@ async function createAudioInputDeviceSnapshot(): Promise<
 	}
 
 	const devices = await navigator.mediaDevices.enumerateDevices();
-	const audioInputs = devices
-		.filter((device) => device.kind === "audioinput")
-		.map((device) => ({
-			deviceId: device.deviceId,
-			...(device.groupId ? { groupId: device.groupId } : {}),
-			label: device.label,
-		}));
+	const audioInputs = getAvailableMicrophoneDevices(devices).map((device) => ({
+		deviceId: device.deviceId,
+		...(device.groupId ? { groupId: device.groupId } : {}),
+		label: device.label,
+	}));
 
 	return audioInputs.length > 0 ? audioInputs : null;
 }
@@ -1521,12 +1520,15 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			if (useNativeMacScreenCapture || useNativeWindowsCapture) {
 				// Resolve the selected mic label for native capture backends.
 				let micLabel: string | undefined;
+				let nativeMicrophoneDeviceId = microphoneDeviceId;
 				if (microphoneEnabled) {
 					try {
 						const devices = await navigator.mediaDevices.enumerateDevices();
-						const mic = devices.find(
-							(d) => d.deviceId === microphoneDeviceId && d.kind === "audioinput",
+						const availableMicrophones = getAvailableMicrophoneDevices(devices);
+						const mic = availableMicrophones.find(
+							(device) => device.deviceId === microphoneDeviceId,
 						);
+						nativeMicrophoneDeviceId = mic?.deviceId;
 						micLabel = mic?.label || undefined;
 					} catch {
 						// Fall through — native process will use the default mic
@@ -1538,7 +1540,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					{
 						capturesSystemAudio: systemAudioEnabled,
 						capturesMicrophone: microphoneEnabled,
-						microphoneDeviceId,
+						microphoneDeviceId: nativeMicrophoneDeviceId,
 						microphoneLabel: micLabel,
 					},
 				);
