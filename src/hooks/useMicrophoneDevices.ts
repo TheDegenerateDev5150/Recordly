@@ -72,9 +72,13 @@ export function useMicrophoneDevices(enabled: boolean = true, preferredDeviceId?
 
 				let allDevices = await navigator.mediaDevices.enumerateDevices();
 				let audioInputs = getAvailableMicrophoneDevices(allDevices);
+				const rawAudioInputs = allDevices.filter(
+					(device): device is MediaDeviceInfo => device.kind === "audioinput",
+				);
 
 				const needsLabelPermission =
-					audioInputs.length > 0 && audioInputs.every((device) => !device.label.trim());
+					rawAudioInputs.length > 0 &&
+					rawAudioInputs.every((device) => !device.label.trim());
 
 				if (needsLabelPermission && !hasRequestedMicrophoneLabels) {
 					hasRequestedMicrophoneLabels = true;

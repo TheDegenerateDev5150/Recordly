@@ -1520,7 +1520,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			if (useNativeMacScreenCapture || useNativeWindowsCapture) {
 				// Resolve the selected mic label for native capture backends.
 				let micLabel: string | undefined;
-				let nativeMicrophoneDeviceId = microphoneDeviceId;
+				let resolvedMicrophoneDeviceId = microphoneDeviceId;
 				if (microphoneEnabled) {
 					try {
 						const devices = await navigator.mediaDevices.enumerateDevices();
@@ -1528,7 +1528,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 						const mic = availableMicrophones.find(
 							(device) => device.deviceId === microphoneDeviceId,
 						);
-						nativeMicrophoneDeviceId = mic?.deviceId;
+						resolvedMicrophoneDeviceId = mic?.deviceId;
 						micLabel = mic?.label || undefined;
 					} catch {
 						// Fall through — native process will use the default mic
@@ -1540,7 +1540,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					{
 						capturesSystemAudio: systemAudioEnabled,
 						capturesMicrophone: microphoneEnabled,
-						microphoneDeviceId: nativeMicrophoneDeviceId,
+						microphoneDeviceId: resolvedMicrophoneDeviceId,
 						microphoneLabel: micLabel,
 					},
 				);
@@ -1591,7 +1591,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 						console.info("Using browser microphone processing for this recording.");
 						try {
 							const microphoneConstraints = createProcessedMicrophoneConstraints(
-								microphoneDeviceId,
+								resolvedMicrophoneDeviceId,
 								browserMicrophoneProfile.current,
 							);
 							micFallbackRequestedConstraints.current = microphoneConstraints;
